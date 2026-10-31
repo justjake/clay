@@ -533,6 +533,7 @@ typedef struct Clay_ClipElementConfig {
     bool horizontal; // Clip overflowing elements on the X axis.
     bool vertical; // Clip overflowing elements on the Y axis.
     Clay_Vector2 childOffset; // Offsets the x,y positions of all child elements. Used primarily for scrolling containers.
+    bool compressChildren; // Children on a clipped axis shrink to the container's size, down to their own minimums.
 } Clay_ClipElementConfig;
 
 CLAY__WRAPPER_STRUCT(Clay_ClipElementConfig);
@@ -2427,7 +2428,7 @@ void Clay__SizeContainersAlongAxis(bool xAxis, float deltaTime, Clay__int32_tArr
                 // The content is too large, compress the children as much as possible
                 if (sizeToDistribute < 0) {
                     // If the parent clips content in this axis direction, don't compress children, just leave them alone
-                    if (((xAxis && parent->config.clip.horizontal) || (!xAxis && parent->config.clip.vertical))) {
+                    if (((xAxis && parent->config.clip.horizontal) || (!xAxis && parent->config.clip.vertical)) && !parent->config.clip.compressChildren) {
                         continue;
                     }
                     // Scrolling containers preferentially compress before others
