@@ -1189,8 +1189,21 @@ typedef struct {
 Clay__WarningArray Clay__WarningArray_Allocate_Arena(int32_t capacity, Clay_Arena *arena);
 Clay__Warning *Clay__WarningArray_Add(Clay__WarningArray *array, Clay__Warning item);
 void* Clay__Array_Allocate_Arena(int32_t capacity, uint32_t itemSize, Clay_Arena *arena);
-bool Clay__Array_RangeCheck(int32_t index, int32_t length);
-bool Clay__Array_AddCapacityCheck(int32_t length, int32_t capacity);
+#if defined(__GNUC__) || defined(__clang__)
+#define CLAY__ARRAY_CHECK static inline __attribute__((always_inline))
+#define CLAY__ARRAY_ERROR __attribute__((noinline, cold))
+#else
+#define CLAY__ARRAY_CHECK static inline
+#define CLAY__ARRAY_ERROR
+#endif
+CLAY__ARRAY_ERROR bool Clay__Array_RangeError(void);
+CLAY__ARRAY_ERROR bool Clay__Array_CapacityError(void);
+CLAY__ARRAY_CHECK bool Clay__Array_RangeCheck(int32_t index, int32_t length) {
+    return (index < length && index >= 0) || Clay__Array_RangeError();
+}
+CLAY__ARRAY_CHECK bool Clay__Array_AddCapacityCheck(int32_t length, int32_t capacity) {
+    return length < capacity || Clay__Array_CapacityError();
+}
 
 CLAY__ARRAY_DEFINE(bool, Clay__boolArray)
 CLAY__ARRAY_DEFINE(int32_t, Clay__int32_tArray)
@@ -2073,15 +2086,24 @@ void Clay__OpenElement(void) {
     }
 }
 
+static Clay_LayoutElement *Clay__AddZeroedLayoutElement(Clay_LayoutElementArray *array) {
+    Clay_LayoutElement *element;
+    if (!Clay__Array_AddCapacityCheck(array->length, array->capacity)) {
+        return &Clay_LayoutElement_DEFAULT;
+    }
+    element = &array->internalArray[array->length++];
+    *element = CLAY__INIT(Clay_LayoutElement) CLAY__DEFAULT_STRUCT;
+    return element;
+}
+
 void Clay__OpenElementWithId(Clay_ElementId elementId) {
     Clay_Context* context = Clay_GetCurrentContext();
     if (context->layoutElements.length == context->layoutElements.capacity - 1 || context->booleanWarnings.maxElementsExceeded) {
         context->booleanWarnings.maxElementsExceeded = true;
         return;
     }
-    Clay_LayoutElement layoutElement = CLAY__DEFAULT_STRUCT;
-    layoutElement.id = elementId.id;
-    Clay_LayoutElement * openLayoutElement = Clay_LayoutElementArray_Add(&context->layoutElements, layoutElement);
+    Clay_LayoutElement * openLayoutElement = Clay__AddZeroedLayoutElement(&context->layoutElements);
+    openLayoutElement->id = elementId.id;
     Clay__int32_tArray_Add(&context->openLayoutElementStack, context->layoutElements.length - 1);
     Clay__AddHashMapItem(elementId, openLayoutElement);
     Clay__StringArray_Add(&context->layoutElementIdStrings, elementId.stringId);
@@ -2100,8 +2122,10 @@ void Clay__OpenTextElement(Clay_String text, Clay_TextElementConfig textConfig) 
     }
     Clay_LayoutElement *parentElement = Clay__GetOpenLayoutElement();
 
-    Clay_LayoutElement layoutElement = { .textConfig = textConfig, .isTextElement = true, .layerId = parentElement->layerId };
-    Clay_LayoutElement *textElement = Clay_LayoutElementArray_Add(&context->layoutElements, layoutElement);
+    Clay_LayoutElement *textElement = Clay__AddZeroedLayoutElement(&context->layoutElements);
+    textElement->textConfig = textConfig;
+    textElement->isTextElement = true;
+    textElement->layerId = parentElement->layerId;
     if (context->openClipElementStack.length > 0) {
         Clay__int32_tArray_Set(&context->layoutElementClipElementIds, context->layoutElements.length - 1, Clay__int32_tArray_GetValue(&context->openClipElementStack, (int)context->openClipElementStack.length - 1));
     } else {
@@ -4024,11 +4048,8 @@ void* Clay__Array_Allocate_Arena(int32_t capacity, uint32_t itemSize, Clay_Arena
     return CLAY__NULL;
 }
 
-bool Clay__Array_RangeCheck(int32_t index, int32_t length)
+CLAY__ARRAY_ERROR bool Clay__Array_RangeError(void)
 {
-    if (index < length && index >= 0) {
-        return true;
-    }
     Clay_Context* context = Clay_GetCurrentContext();
     context->errorHandler.errorHandlerFunction(CLAY__INIT(Clay_ErrorData) {
             .errorType = CLAY_ERROR_TYPE_INTERNAL_ERROR,
@@ -4037,11 +4058,8 @@ bool Clay__Array_RangeCheck(int32_t index, int32_t length)
     return false;
 }
 
-bool Clay__Array_AddCapacityCheck(int32_t length, int32_t capacity)
+CLAY__ARRAY_ERROR bool Clay__Array_CapacityError(void)
 {
-    if (length < capacity) {
-        return true;
-    }
     Clay_Context* context = Clay_GetCurrentContext();
     context->errorHandler.errorHandlerFunction(CLAY__INIT(Clay_ErrorData) {
         .errorType = CLAY_ERROR_TYPE_INTERNAL_ERROR,
