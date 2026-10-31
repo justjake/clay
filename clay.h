@@ -3250,6 +3250,7 @@ CLAY_DLL_EXPORT Clay_ElementIdArray Clay_GetPointerOverIds(void) {
     return Clay_GetCurrentContext()->pointerOverIds;
 }
 
+#ifndef CLAY_DISABLE_DEBUG_VIEW
 #pragma region DebugTools
 Clay_Color CLAY__DEBUGVIEW_COLOR_1 = {58, 56, 52, 255};
 Clay_Color CLAY__DEBUGVIEW_COLOR_2 = {62, 60, 58, 255};
@@ -4001,6 +4002,7 @@ void Clay__RenderDebugView(void) {
     }
 }
 #pragma endregion
+#endif // CLAY_DISABLE_DEBUG_VIEW
 
 uint32_t Clay__debugViewWidth = 400;
 Clay_Color Clay__debugViewHighlightColor = { 168, 66, 28, 100 };
@@ -4803,7 +4805,9 @@ Clay_RenderCommandArray Clay_EndLayout(float deltaTime) {
 
             if (context->debugModeEnabled) {
                 context->warningsEnabled = false;
+#ifndef CLAY_DISABLE_DEBUG_VIEW
                 Clay__RenderDebugView();
+#endif
                 context->warningsEnabled = true;
             }
 
@@ -4822,7 +4826,9 @@ Clay_RenderCommandArray Clay_EndLayout(float deltaTime) {
         } else {
             if (context->debugModeEnabled) {
                 context->warningsEnabled = false;
+#ifndef CLAY_DISABLE_DEBUG_VIEW
                 Clay__RenderDebugView();
+#endif
                 context->warningsEnabled = true;
             }
 
