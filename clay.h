@@ -792,6 +792,8 @@ typedef struct Clay_RenderCommand {
     void *userData;
     // The id of this element, transparently passed through from the original element declaration.
     uint32_t id;
+    // The id of the nearest element declared with .layer, or 0 for the root layer.
+    uint32_t layerId;
     // The z order required for drawing this command correctly.
     // Note: the render command array is already sorted in ascending order, and will produce correct results if drawn in naive order.
     // This field is intended for use in batching renderers for improved performance.
@@ -867,6 +869,8 @@ typedef struct Clay_ElementDeclaration {
     // Controls settings related to element borders, and will generate BORDER render commands.
     Clay_BorderElementConfig border;
     Clay_TransitionElementConfig transition;
+    // Makes this element a compositor layer: its subtree's render commands carry its id as layerId.
+    bool layer;
     // A pointer that will be transparently passed through to resulting render commands.
     void *userData;
 } Clay_ElementDeclaration;
@@ -939,6 +943,9 @@ CLAY_DLL_EXPORT Clay_Arena Clay_CreateArenaWithCapacityAndMemory(size_t capacity
 // Sets the state of the "pointer" (i.e. the mouse or touch) in Clay's internal data. Used for detecting and responding to mouse events in the debug view,
 // as well as for Clay_Hovered() and scroll element handling.
 CLAY_DLL_EXPORT void Clay_SetPointerState(Clay_Vector2 position, bool pointerDown);
+// Maps a screen position into a layer's layout coordinates for pointer tests.
+typedef Clay_Vector2 (*Clay_LayerPointerFunction)(uint32_t layerId, Clay_Vector2 position, void *userData);
+CLAY_DLL_EXPORT void Clay_SetLayerPointerFunction(Clay_LayerPointerFunction function, void *userData);
 // Returns the state of the "pointer" (i.e. the mouse or touch) which was set via Clay_SetPointerState().
 CLAY_DLL_EXPORT Clay_PointerData Clay_GetPointerState(void);
 // Initialize Clay's internal arena and setup required data before layout can begin. Only needs to be called once.
@@ -1221,6 +1228,7 @@ typedef struct Clay_LayoutElement {
         };
     };
     uint32_t id;
+    uint32_t layerId;
     uint16_t floatingChildrenCount;
     bool isTextElement;
     // True if the element is currently in an exit transition, and is "synthetic"
@@ -1336,11 +1344,14 @@ struct Clay_Context {
     Clay__WarningArray warnings;
 
     Clay_PointerData pointerInfo;
+    Clay_LayerPointerFunction layerPointer;
+    void *layerPointerUserData;
     Clay_Dimensions layoutDimensions;
     Clay_ElementId dynamicElementIndexBaseHash;
     uint32_t dynamicElementIndex;
     bool debugModeEnabled;
     bool disableCulling;
+    uint32_t renderLayerId;
     bool externalScrollHandlingEnabled;
     uint32_t debugSelectedElementId;
     uint32_t generation;
@@ -2088,7 +2099,7 @@ void Clay__OpenTextElement(Clay_String text, Clay_TextElementConfig textConfig) 
     }
     Clay_LayoutElement *parentElement = Clay__GetOpenLayoutElement();
 
-    Clay_LayoutElement layoutElement = { .textConfig = textConfig, .isTextElement = true };
+    Clay_LayoutElement layoutElement = { .textConfig = textConfig, .isTextElement = true, .layerId = parentElement->layerId };
     Clay_LayoutElement *textElement = Clay_LayoutElementArray_Add(&context->layoutElements, layoutElement);
     if (context->openClipElementStack.length > 0) {
         Clay__int32_tArray_Set(&context->layoutElementClipElementIds, context->layoutElements.length - 1, Clay__int32_tArray_GetValue(&context->openClipElementStack, (int)context->openClipElementStack.length - 1));
@@ -2113,6 +2124,18 @@ void Clay__ConfigureOpenElementPtr(const Clay_ElementDeclaration *declaration) {
     Clay_Context* context = Clay_GetCurrentContext();
     Clay_LayoutElement *openLayoutElement = Clay__GetOpenLayoutElement();
     openLayoutElement->config = *declaration;
+    openLayoutElement->layerId = 0;
+    if (declaration->floating.attachTo == CLAY_ATTACH_TO_ELEMENT_WITH_ID) {
+        Clay_LayoutElementHashMapItem *attachItem = Clay__GetHashMapItem(declaration->floating.parentId);
+        if (attachItem != &Clay_LayoutElementHashMapItem_DEFAULT && attachItem->layoutElement) {
+            openLayoutElement->layerId = attachItem->layoutElement->layerId;
+        }
+    } else if (declaration->floating.attachTo != CLAY_ATTACH_TO_ROOT && context->openLayoutElementStack.length > 1) {
+        openLayoutElement->layerId = Clay_LayoutElementArray_Get(&context->layoutElements, Clay__int32_tArray_GetValue(&context->openLayoutElementStack, context->openLayoutElementStack.length - 2))->layerId;
+    }
+    if (declaration->layer) {
+        openLayoutElement->layerId = openLayoutElement->id;
+    }
     if ((declaration->layout.sizing.width.type == CLAY__SIZING_TYPE_PERCENT && declaration->layout.sizing.width.size.percent > 1) || (declaration->layout.sizing.height.type == CLAY__SIZING_TYPE_PERCENT && declaration->layout.sizing.height.size.percent > 1)) {
         context->errorHandler.errorHandlerFunction(CLAY__INIT(Clay_ErrorData) {
                 .errorType = CLAY_ERROR_TYPE_PERCENTAGE_OVER_1,
@@ -2545,6 +2568,7 @@ Clay_String Clay__IntToString(int32_t integer) {
 
 void Clay__AddRenderCommand(Clay_RenderCommand renderCommand) {
     Clay_Context* context = Clay_GetCurrentContext();
+    renderCommand.layerId = context->renderLayerId;
     if (context->renderCommands.length < context->renderCommands.capacity - 1) {
         Clay_RenderCommandArray_Add(&context->renderCommands, renderCommand);
     } else {
@@ -2558,9 +2582,9 @@ void Clay__AddRenderCommand(Clay_RenderCommand renderCommand) {
     }
 }
 
-bool Clay__ElementIsOffscreen(Clay_BoundingBox *boundingBox) {
+bool Clay__ElementIsOffscreen(Clay_BoundingBox *boundingBox, uint32_t layerId) {
     Clay_Context* context = Clay_GetCurrentContext();
-    if (context->disableCulling) {
+    if (context->disableCulling || layerId) {
         return false;
     }
 
@@ -2780,7 +2804,8 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
         }
         if (root->clipElementId) {
             Clay_LayoutElementHashMapItem *clipHashMapItem = Clay__GetHashMapItem(root->clipElementId);
-            if (clipHashMapItem && !Clay__ElementIsOffscreen(&clipHashMapItem->boundingBox)) {
+            if (clipHashMapItem && !Clay__ElementIsOffscreen(&clipHashMapItem->boundingBox, clipHashMapItem->layoutElement ? clipHashMapItem->layoutElement->layerId : 0)) {
+                context->renderLayerId = clipHashMapItem->layoutElement->layerId;
                 // Floating elements that are attached to scrolling contents won't be correctly positioned if external scroll handling is enabled, fix here
                 if (context->externalScrollHandlingEnabled) {
                     if (clipHashMapItem->layoutElement->config.clip.horizontal) {
@@ -2807,6 +2832,7 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
         while (dfsBuffer.length > 0) {
             Clay__LayoutElementTreeNode *currentElementTreeNode = Clay__LayoutElementTreeNodeArray_Get(&dfsBuffer, (int)dfsBuffer.length - 1);
             Clay_LayoutElement *currentElement = currentElementTreeNode->layoutElement;
+            context->renderLayerId = currentElement->layerId;
             Clay_LayoutConfig *layoutConfig = currentElement->isTextElement ? &CLAY_LAYOUT_DEFAULT : &currentElement->config.layout;
             Clay_Vector2 scrollOffset = CLAY__DEFAULT_STRUCT;
 
@@ -2817,7 +2843,7 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
                     continue;
                 }
                 Clay_LayoutElementHashMapItem *currentElementData = Clay__GetHashMapItem(currentElement->id);
-                if (generateRenderCommands && !Clay__ElementIsOffscreen(&currentElementData->boundingBox)) {
+                if (generateRenderCommands && !Clay__ElementIsOffscreen(&currentElementData->boundingBox, currentElement->layerId)) {
                     // DFS is returning upwards backwards
                     bool closeClipElement = false;
                     if (currentElement->config.clip.horizontal || currentElement->config.clip.vertical) {
@@ -2963,7 +2989,7 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
                 }
             }
 
-            bool offscreen = Clay__ElementIsOffscreen(&currentElementBoundingBox);
+            bool offscreen = Clay__ElementIsOffscreen(&currentElementBoundingBox, currentElement->layerId);
 
             // Generate render commands for current element
             if (generateRenderCommands && !offscreen) {
@@ -3003,7 +3029,7 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
                         });
                         yPosition += finalLineHeight;
 
-                        if (!context->disableCulling && (currentElementBoundingBox.y + yPosition > context->layoutDimensions.height)) {
+                        if (!context->disableCulling && !currentElement->layerId && (currentElementBoundingBox.y + yPosition > context->layoutDimensions.height)) {
                             break;
                         }
                     }
@@ -3185,11 +3211,13 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
 
         if (root->clipElementId) {
             Clay_LayoutElementHashMapItem *clipHashMapItem = Clay__GetHashMapItem(root->clipElementId);
-            if (clipHashMapItem && !Clay__ElementIsOffscreen(&clipHashMapItem->boundingBox)) {
+            if (clipHashMapItem && !Clay__ElementIsOffscreen(&clipHashMapItem->boundingBox, clipHashMapItem->layoutElement ? clipHashMapItem->layoutElement->layerId : 0)) {
+                context->renderLayerId = clipHashMapItem->layoutElement->layerId;
                 Clay__AddRenderCommand(CLAY__INIT(Clay_RenderCommand) { .id = Clay__HashNumber(rootElement->id, rootElement->children.length + 11).id, .commandType = CLAY_RENDER_COMMAND_TYPE_SCISSOR_END });
             }
         }
     }
+    context->renderLayerId = 0;
 }
 
 CLAY_WASM_EXPORT("Clay_GetPointerOverIds")
@@ -3304,7 +3332,7 @@ Clay__RenderDebugLayoutData Clay__RenderDebugLayoutElementsList(int32_t initialR
 
             context->treeNodeVisited.internalArray[dfsBuffer.length - 1] = true;
             Clay_LayoutElementHashMapItem *currentElementData = Clay__GetHashMapItem(currentElement->id);
-            bool offscreen = Clay__ElementIsOffscreen(&currentElementData->boundingBox);
+            bool offscreen = Clay__ElementIsOffscreen(&currentElementData->boundingBox, currentElement->layerId);
             if (context->debugSelectedElementId == currentElement->id) {
                 layoutData.selectedElementRowIndex = layoutData.rowCount;
             }
@@ -4080,6 +4108,16 @@ Clay_Dimensions Clay_GetLayoutDimensions() {
     return context->layoutDimensions;
 }
 
+void Clay_SetLayerPointerFunction(Clay_LayerPointerFunction function, void *userData) {
+    Clay_Context* context = Clay_GetCurrentContext();
+    context->layerPointer = function;
+    context->layerPointerUserData = userData;
+}
+
+static Clay_Vector2 Clay__LayerPointer(Clay_Context *context, uint32_t layerId, Clay_Vector2 position) {
+    return layerId && context->layerPointer ? context->layerPointer(layerId, position, context->layerPointerUserData) : position;
+}
+
 CLAY_WASM_EXPORT("Clay_SetPointerState")
 void Clay_SetPointerState(Clay_Vector2 position, bool isPointerDown) {
     Clay_Context* context = Clay_GetCurrentContext();
@@ -4135,7 +4173,7 @@ void Clay_SetPointerState(Clay_Vector2 position, bool isPointerDown) {
                 Clay_BoundingBox elementBox = mapItem->boundingBox;
                 elementBox.x -= root->pointerOffset.x;
                 elementBox.y -= root->pointerOffset.y;
-                if ((Clay__PointIsInsideRect(position, elementBox)) && (clipElementId == 0 || (Clay__PointIsInsideRect(position, clipItem->boundingBox)) || context->externalScrollHandlingEnabled)) {
+                if ((Clay__PointIsInsideRect(Clay__LayerPointer(context, currentElement->layerId, position), elementBox)) && (clipElementId == 0 || (Clay__PointIsInsideRect(Clay__LayerPointer(context, clipItem->layoutElement ? clipItem->layoutElement->layerId : 0, position), clipItem->boundingBox)) || context->externalScrollHandlingEnabled)) {
                     if (!skipTree) {
                         if (mapItem->onHoverFunction) {
                             mapItem->onHoverFunction(mapItem->elementId, context->pointerInfo, mapItem->hoverFunctionUserData);
