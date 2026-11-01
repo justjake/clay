@@ -786,6 +786,8 @@ typedef CLAY_PACKED_ENUM {
     CLAY_RENDER_COMMAND_TYPE_HIT_REGION,
     // Marks where an element shows focus; carries no renderData.
     CLAY_RENDER_COMMAND_TYPE_FOCUS_REGION,
+    // Marks where a layer element's subtree begins; carries no renderData.
+    CLAY_RENDER_COMMAND_TYPE_LAYER,
 } Clay_RenderCommandType;
 
 typedef struct Clay_RenderCommand {
@@ -874,7 +876,7 @@ typedef struct Clay_ElementDeclaration {
     // Controls settings related to element borders, and will generate BORDER render commands.
     Clay_BorderElementConfig border;
     Clay_TransitionElementConfig transition;
-    // Makes this element a compositor layer: its subtree's render commands carry its id as layerId.
+    // Makes this element a compositor layer: its subtree's render commands carry its id as layerId, and it emits a CLAY_RENDER_COMMAND_TYPE_LAYER command where it begins.
     bool layer;
     // Emits a CLAY_RENDER_COMMAND_TYPE_HIT_REGION command: where the element takes touches.
     bool interactive;
@@ -3067,6 +3069,15 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
                         }
                     }
                 } else {
+                    if (currentElement->config.layer) {
+                        Clay__AddRenderCommand(CLAY__INIT(Clay_RenderCommand) {
+                            .boundingBox = currentElementBoundingBox,
+                            .userData = currentElement->config.userData,
+                            .id = currentElement->id,
+                            .zIndex = root->zIndex,
+                            .commandType = CLAY_RENDER_COMMAND_TYPE_LAYER,
+                        });
+                    }
                     if (currentElement->config.overlayColor.a > 0) {
                         Clay_RenderCommand renderCommand = {
                             .renderData = {
