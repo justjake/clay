@@ -782,6 +782,10 @@ typedef CLAY_PACKED_ENUM {
     CLAY_RENDER_COMMAND_TYPE_OVERLAY_COLOR_END,
     // The renderer should provide a custom implementation for handling this render command based on its .customData
     CLAY_RENDER_COMMAND_TYPE_CUSTOM,
+    // Marks where an element takes touches; carries no renderData.
+    CLAY_RENDER_COMMAND_TYPE_HIT_REGION,
+    // Marks where an element shows focus; carries no renderData.
+    CLAY_RENDER_COMMAND_TYPE_FOCUS_REGION,
 } Clay_RenderCommandType;
 
 typedef struct Clay_RenderCommand {
@@ -872,6 +876,10 @@ typedef struct Clay_ElementDeclaration {
     Clay_TransitionElementConfig transition;
     // Makes this element a compositor layer: its subtree's render commands carry its id as layerId.
     bool layer;
+    // Emits a CLAY_RENDER_COMMAND_TYPE_HIT_REGION command: where the element takes touches.
+    bool interactive;
+    // Emits a CLAY_RENDER_COMMAND_TYPE_FOCUS_REGION command: where the element shows focus.
+    bool focusable;
     // A pointer that will be transparently passed through to resulting render commands.
     void *userData;
 } Clay_ElementDeclaration;
@@ -3134,6 +3142,24 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
                             .commandType = CLAY_RENDER_COMMAND_TYPE_RECTANGLE,
                         };
                         Clay__AddRenderCommand(renderCommand);
+                    }
+                    if (currentElement->config.interactive) {
+                        Clay__AddRenderCommand(CLAY__INIT(Clay_RenderCommand) {
+                            .boundingBox = currentElementBoundingBox,
+                            .userData = currentElement->config.userData,
+                            .id = currentElement->id,
+                            .zIndex = root->zIndex,
+                            .commandType = CLAY_RENDER_COMMAND_TYPE_HIT_REGION,
+                        });
+                    }
+                    if (currentElement->config.focusable) {
+                        Clay__AddRenderCommand(CLAY__INIT(Clay_RenderCommand) {
+                            .boundingBox = currentElementBoundingBox,
+                            .userData = currentElement->config.userData,
+                            .id = currentElement->id,
+                            .zIndex = root->zIndex,
+                            .commandType = CLAY_RENDER_COMMAND_TYPE_FOCUS_REGION,
+                        });
                     }
                 }
             }
